@@ -76,6 +76,9 @@ export interface VentaItem {
   cantidad: number;
   precio_unitario: number;
   subtotal: number;
+  /** Solo se usa en el carrito: guarda el precio antes de marcar la línea como obsequio,
+   *  para poder restaurarlo al desmarcarla. No se persiste. */
+  precio_original?: number;
   es_preparado?: boolean;
   receta?: {
     materia_prima_id: string;

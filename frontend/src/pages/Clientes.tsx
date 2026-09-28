@@ -14,10 +14,18 @@ const EMPTY: any = {
   ciudad: '', direccion: '', limite_credito: '', credito_usado: '', fecha_registro: new Date().toISOString().split('T')[0]
 };
 
+const FILTROS_CREDITO = [
+  { valor: 'todos' as const, etiqueta: 'Todos' },
+  { valor: 'con_deuda' as const, etiqueta: 'Con deuda' },
+  { valor: 'al_dia' as const, etiqueta: 'Al día' },
+  { valor: 'sin_credito' as const, etiqueta: 'Sin crédito' },
+];
+
 export function Clientes() {
   const { clientes, ventas, abonos, addCliente, updateCliente, deleteCliente, addAbono } = useAppData();
   const { user } = useAuth();
   const [search, setSearch] = useState('');
+  const [filterCredito, setFilterCredito] = useState<'todos' | 'con_deuda' | 'al_dia' | 'sin_credito'>('todos');
   const [modalOpen, setModalOpen] = useState(false);
   const [editItem, setEditItem] = useState<Cliente | null>(null);
   const [form, setForm] = useState<any>(EMPTY);
@@ -49,13 +57,25 @@ export function Clientes() {
     setForm((f: any) => ({ ...f, [field]: numericValue }));
   };
 
+  // Para un cliente el "estado" relevante es su situación de crédito, que es lo que se
+  // consulta a diario: a quién hay que cobrarle y quién está al día.
   const filtered = useMemo(() =>
-    clientes.filter(c =>
-      (c.nombre || '').toLowerCase().includes(search.toLowerCase()) ||
-      (c.email || '').toLowerCase().includes(search.toLowerCase()) ||
-      (c.ciudad || '').toLowerCase().includes(search.toLowerCase()) ||
-      (c.documento || '').includes(search)
-    ), [clientes, search]
+    clientes.filter(c => {
+      const texto = search.toLowerCase();
+      const coincideTexto =
+        (c.nombre || '').toLowerCase().includes(texto) ||
+        (c.email || '').toLowerCase().includes(texto) ||
+        (c.ciudad || '').toLowerCase().includes(texto) ||
+        (c.documento || '').includes(search);
+      if (!coincideTexto) return false;
+
+      const deuda = Number(c.credito_usado) || 0;
+      const limite = Number(c.limite_credito) || 0;
+      if (filterCredito === 'con_deuda') return deuda > 0;
+      if (filterCredito === 'al_dia') return deuda === 0 && limite > 0;
+      if (filterCredito === 'sin_credito') return limite === 0;
+      return true;
+    }), [clientes, search, filterCredito]
   );
 
   const ultimosAbonosMap = useMemo(() => {
@@ -211,15 +231,32 @@ export function Clientes() {
         </div>
       }
     >
-      {/* Search */}
-      <div className="relative mb-5 max-w-md">
-        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
-        <input
-          value={search}
-          onChange={e => { setSearch(e.target.value); setCurrentPage(1); }}
-          placeholder="Buscar por nombre, documento, ciudad…"
-          className="w-full pl-9 pr-4 py-2.5 rounded-lg border border-zinc-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-400"
-        />
+      {/* Search + filtro */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-5">
+        <div className="relative w-full sm:max-w-md">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
+          <input
+            value={search}
+            onChange={e => { setSearch(e.target.value); setCurrentPage(1); }}
+            placeholder="Buscar por nombre, documento, ciudad…"
+            className="w-full pl-9 pr-4 py-2.5 rounded-lg border border-zinc-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-400"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {FILTROS_CREDITO.map(f => (
+            <button
+              key={f.valor}
+              onClick={() => { setFilterCredito(f.valor); setCurrentPage(1); }}
+              className={`px-3.5 py-2 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
+                filterCredito === f.valor
+                  ? 'bg-amber-600 text-white border-amber-600 shadow-sm'
+                  : 'bg-white text-zinc-600 border-zinc-200 hover:border-zinc-300'
+              }`}
+            >
+              {f.etiqueta}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Table view & Mobile Cards */}

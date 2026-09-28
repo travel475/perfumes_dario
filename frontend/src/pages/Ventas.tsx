@@ -47,6 +47,10 @@ function NuevaVentaModal({
   const [searchCliente, setSearchCliente] = useState('');
   const [metodoPago, setMetodoPago] = useState<'contado' | 'credito'>('contado');
   const [abonoInicial, setAbonoInicial] = useState<number>(0);
+  const [descuentoTipo, setDescuentoTipo] = useState<'porcentaje' | 'monto'>('porcentaje');
+  const [descuentoValor, setDescuentoValor] = useState<number>(0);
+  const [descuentoMotivo, setDescuentoMotivo] = useState<string>('');
+  const [descuentoAbierto, setDescuentoAbierto] = useState(false);
   const [abonoMetodoPago, setAbonoMetodoPago] = useState<'efectivo' | 'transferencia' | 'tarjeta'>('efectivo');
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +63,10 @@ function NuevaVentaModal({
     setSearchCliente('');
     setMetodoPago('contado');
     setAbonoInicial(0);
+    setDescuentoTipo('porcentaje');
+    setDescuentoValor(0);
+    setDescuentoMotivo('');
+    setDescuentoAbierto(false);
     setAbonoMetodoPago('efectivo');
     setSuccess(false);
     setError(null);
@@ -92,11 +100,13 @@ function NuevaVentaModal({
     setCarrito(prev => {
       const existing = prev.find(i => i.producto_id === prod.id);
       if (existing) {
-        return prev.map(i =>
-          i.producto_id === prod.id
-            ? { ...i, cantidad: Math.min(i.cantidad + 1, prod.es_por_encargo ? 9999 : prod.stock), subtotal: (i.cantidad + 1) * prod.precio_venta }
-            : i
-        );
+        return prev.map(i => {
+          if (i.producto_id !== prod.id) return i;
+          // Se usa el precio de la linea y no el del catalogo: si esta marcada como
+          // obsequio vale 0 y debe seguir valiendo 0 al sumar unidades.
+          const cantidad = Math.min(i.cantidad + 1, prod.es_por_encargo ? 9999 : prod.stock);
+          return { ...i, cantidad, subtotal: cantidad * i.precio_unitario };
+        });
       }
       return [...prev, {
         producto_id: prod.id,
@@ -126,7 +136,37 @@ function NuevaVentaModal({
   const quitarProducto = (prodId: string) =>
     setCarrito(prev => prev.filter(i => i.producto_id !== prodId));
 
-  const total = carrito.reduce((s, i) => s + i.subtotal, 0);
+  // Un obsequio es una linea a precio 0: descuenta stock igual, no cobra, y su costo
+  // se sigue restando de la ganancia porque la mercancia salio del inventario.
+  const esObsequio = (item: VentaItem) => Number(item.precio_unitario) === 0;
+
+  const toggleObsequio = (prodId: string) => {
+    setCarrito(prev => prev.map(i => {
+      if (i.producto_id !== prodId) return i;
+      if (esObsequio(i)) {
+        const precio = i.precio_original ?? 0;
+        return { ...i, precio_unitario: precio, subtotal: i.cantidad * precio, precio_original: undefined };
+      }
+      return { ...i, precio_original: i.precio_unitario, precio_unitario: 0, subtotal: 0 };
+    }));
+  };
+
+  const subtotalBruto = carrito.reduce((s, i) => s + i.subtotal, 0);
+
+  // El descuento nunca puede superar el subtotal: el total jamás debe quedar negativo.
+  const descuentoMonto = subtotalBruto <= 0 ? 0 : Math.min(
+    subtotalBruto,
+    Math.max(0, descuentoTipo === 'porcentaje'
+      ? Math.round(subtotalBruto * (Math.min(descuentoValor, 100) / 100))
+      : Math.round(descuentoValor))
+  );
+  const descuentoPct = subtotalBruto > 0 ? (descuentoMonto / subtotalBruto) * 100 : 0;
+
+  // De aquí en adelante "total" es el neto ya descontado: es lo que se cobra, lo que se
+  // adeuda y lo que queda guardado en la venta.
+  const total = subtotalBruto - descuentoMonto;
+
+  const MOTIVOS_DESCUENTO = ['Cumpleaños', 'Cliente frecuente', 'Promoción', 'Mayorista'];
 
   const WALK_IN_ID = 'walk-in';
   const clienteSeleccionado = clienteId === 'walk-in'
@@ -156,7 +196,16 @@ function NuevaVentaModal({
       }
     }
 
-    if (metodoPago === 'credito' && clienteSeleccionado && clienteSeleccionado.id !== 'walk-in') {
+    if (descuentoMonto > 0 && !descuentoMotivo.trim()) {
+      setError('Indica el motivo del descuento. Elige uno de los botones o escríbelo.');
+      return;
+    }
+
+    // Una venta que se entrega completa como obsequio no genera cobro: no tiene
+    // sentido registrarla a crédito ni sumarle deuda al cliente.
+    const metodoPagoFinal = total === 0 ? 'contado' : metodoPago;
+
+    if (metodoPagoFinal === 'credito' && clienteSeleccionado && clienteSeleccionado.id !== 'walk-in') {
       const limite = clienteSeleccionado.limite_credito || 0;
       const deuda = clienteSeleccionado.credito_usado || 0;
       const deudaNetaVenta = Math.max(0, total - (abonoInicial || 0));
@@ -166,7 +215,19 @@ function NuevaVentaModal({
       }
     }
 
-    addVenta(carrito, clienteId, user.id, user.name, user.role, metodoPago, abonoInicial, abonoMetodoPago);
+    // El descuento viaja como una línea negativa más: addVenta calcula el total sumando
+    // los subtotales, así que el total guardado ya sale descontado sin tocar el backend.
+    const itemsFinales = descuentoMonto > 0
+      ? [...carrito, {
+          producto_id: '',
+          nombre: `Descuento · ${descuentoMotivo.trim()}`,
+          cantidad: 1,
+          precio_unitario: -descuentoMonto,
+          subtotal: -descuentoMonto,
+        }]
+      : carrito;
+
+    addVenta(itemsFinales, clienteId, user.id, user.name, user.role, metodoPagoFinal, total === 0 ? 0 : abonoInicial, abonoMetodoPago);
     setSuccess(true);
   };
 
@@ -392,15 +453,124 @@ function NuevaVentaModal({
                                 className="w-5 h-5 rounded bg-zinc-100 hover:bg-zinc-200 text-zinc-600 flex items-center justify-center text-xs font-bold cursor-pointer"
                               >+</button>
                             </div>
-                            <span className="text-xs font-bold text-amber-600">{formatCurrency(item.subtotal)}</span>
+                            {esObsequio(item) ? (
+                              <span className="text-[10px] font-extrabold text-emerald-600 tracking-wide">OBSEQUIO</span>
+                            ) : (
+                              <span className="text-xs font-bold text-amber-600">{formatCurrency(item.subtotal)}</span>
+                            )}
                           </div>
+                          {!item.es_preparado && (
+                            <label className="flex items-center gap-1.5 mt-1.5 cursor-pointer select-none w-fit">
+                              <input
+                                type="checkbox"
+                                checked={esObsequio(item)}
+                                onChange={() => toggleObsequio(item.producto_id)}
+                                className="w-3.5 h-3.5 rounded border-zinc-300 accent-emerald-600 cursor-pointer"
+                              />
+                              <span className={`text-[10px] font-semibold ${esObsequio(item) ? 'text-emerald-700' : 'text-zinc-400'}`}>
+                                Obsequio
+                              </span>
+                            </label>
+                          )}
                         </div>
                       );
                     })}
                   </div>
                   {carrito.length > 0 && (
-                    <div className="mt-2 p-2.5 bg-zinc-50 rounded-lg border border-zinc-200">
-                      <div className="flex items-center justify-between">
+                    <div className="mt-2 p-2.5 bg-zinc-50 rounded-lg border border-zinc-200 space-y-2">
+                      {descuentoMonto > 0 && (
+                        <div className="flex items-center justify-between text-xs text-zinc-500">
+                          <span>Subtotal</span>
+                          <span className="font-mono">{formatCurrency(subtotalBruto)}</span>
+                        </div>
+                      )}
+
+                      {subtotalBruto > 0 && !descuentoAbierto && descuentoMonto === 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setDescuentoAbierto(true)}
+                          className="text-[11px] font-semibold text-amber-600 hover:text-amber-700 cursor-pointer"
+                        >
+                          + Aplicar descuento
+                        </button>
+                      )}
+
+                      {subtotalBruto > 0 && (descuentoAbierto || descuentoMonto > 0) && (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-2.5 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] uppercase font-bold text-amber-800 tracking-wider">Descuento</span>
+                            <button
+                              type="button"
+                              onClick={() => { setDescuentoAbierto(false); setDescuentoValor(0); setDescuentoMotivo(''); }}
+                              className="text-[10px] font-semibold text-zinc-400 hover:text-red-500 cursor-pointer"
+                            >Quitar</button>
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            <div className="flex rounded-md overflow-hidden border border-amber-300 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => setDescuentoTipo('porcentaje')}
+                                className={`px-2 py-1 text-[11px] font-bold cursor-pointer transition-colors ${descuentoTipo === 'porcentaje' ? 'bg-amber-500 text-white' : 'bg-white text-amber-700 hover:bg-amber-100'}`}
+                              >%</button>
+                              <button
+                                type="button"
+                                onClick={() => setDescuentoTipo('monto')}
+                                className={`px-2 py-1 text-[11px] font-bold cursor-pointer transition-colors ${descuentoTipo === 'monto' ? 'bg-amber-500 text-white' : 'bg-white text-amber-700 hover:bg-amber-100'}`}
+                              >COP</button>
+                            </div>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              value={descuentoValor === 0 ? '' : descuentoValor}
+                              onChange={e => {
+                                const v = e.target.value.replace(/\D/g, '');
+                                setDescuentoValor(v === '' ? 0 : Number(v));
+                              }}
+                              placeholder={descuentoTipo === 'porcentaje' ? '10' : '90.000'}
+                              className="flex-1 min-w-0 px-2 py-1 rounded-md border border-amber-300 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-amber-400"
+                            />
+                          </div>
+
+                          {descuentoMonto > 0 && (
+                            <p className="text-[10px] text-amber-800 font-semibold">
+                              {descuentoTipo === 'porcentaje'
+                                ? `Equivale a ${formatCurrency(descuentoMonto)}`
+                                : `Equivale al ${descuentoPct.toFixed(1)}% del subtotal`}
+                            </p>
+                          )}
+
+                          <div className="flex flex-wrap gap-1">
+                            {MOTIVOS_DESCUENTO.map(m => (
+                              <button
+                                key={m}
+                                type="button"
+                                onClick={() => setDescuentoMotivo(descuentoMotivo === m ? '' : m)}
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold cursor-pointer transition-colors ${descuentoMotivo === m ? 'bg-amber-600 text-white' : 'bg-white text-zinc-600 border border-zinc-200 hover:border-amber-300'}`}
+                              >{m}</button>
+                            ))}
+                          </div>
+                          <input
+                            type="text"
+                            value={MOTIVOS_DESCUENTO.includes(descuentoMotivo) ? '' : descuentoMotivo}
+                            onChange={e => setDescuentoMotivo(e.target.value)}
+                            placeholder="U otro motivo…"
+                            className={`w-full px-2 py-1 rounded-md text-[11px] focus:outline-none focus:ring-1 focus:ring-amber-400 ${descuentoMonto > 0 && !descuentoMotivo.trim() ? 'border border-red-300 bg-red-50/50' : 'border border-zinc-200'}`}
+                          />
+                          {descuentoMonto > 0 && !descuentoMotivo.trim() && (
+                            <p className="text-[10px] font-semibold text-red-600">El motivo es obligatorio.</p>
+                          )}
+                        </div>
+                      )}
+
+                      {descuentoMonto > 0 && (
+                        <div className="flex items-center justify-between text-xs text-emerald-700 font-semibold">
+                          <span className="truncate pr-2">Descuento{descuentoMotivo ? ` · ${descuentoMotivo}` : ''}</span>
+                          <span className="font-mono shrink-0">−{formatCurrency(descuentoMonto)}</span>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between pt-1.5 border-t border-zinc-200">
                         <span className="text-xs text-zinc-500 font-medium">Total</span>
                         <span className="text-base font-bold text-amber-600">{formatCurrency(total)}</span>
                       </div>
@@ -554,8 +724,12 @@ function NuevaVentaModal({
                       <tr key={item.producto_id}>
                         <td className="px-4 py-2.5 text-zinc-700 truncate max-w-0" title={item.nombre}>{item.nombre}</td>
                         <td className="px-4 py-2.5 text-center text-zinc-600">{item.cantidad}</td>
-                        <td className="px-4 py-2.5 text-right text-zinc-600">{formatCurrency(item.precio_unitario)}</td>
-                        <td className="px-4 py-2.5 text-right font-semibold text-zinc-800">{formatCurrency(item.subtotal)}</td>
+                        <td className="px-4 py-2.5 text-right text-zinc-600">{esObsequio(item) ? '—' : formatCurrency(item.precio_unitario)}</td>
+                        <td className="px-4 py-2.5 text-right font-semibold">
+                          {esObsequio(item)
+                            ? <span className="text-emerald-600 font-extrabold text-xs">OBSEQUIO</span>
+                            : <span className="text-zinc-800">{formatCurrency(item.subtotal)}</span>}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -572,6 +746,20 @@ function NuevaVentaModal({
                         </tr>
                       </>
                     )}
+                    {descuentoMonto > 0 && (
+                      <>
+                        <tr>
+                          <td colSpan={3} className="px-4 py-1.5 text-right text-xs text-zinc-500 font-medium">Subtotal:</td>
+                          <td className="px-4 py-1.5 text-right text-xs text-zinc-600 font-mono">{formatCurrency(subtotalBruto)}</td>
+                        </tr>
+                        <tr>
+                          <td colSpan={3} className="px-4 py-1.5 text-right text-xs text-emerald-700 font-semibold">
+                            Descuento{descuentoMotivo ? ` · ${descuentoMotivo}` : ''}:
+                          </td>
+                          <td className="px-4 py-1.5 text-right text-xs font-bold text-emerald-600 font-mono">−{formatCurrency(descuentoMonto)}</td>
+                        </tr>
+                      </>
+                    )}
                     <tr className="bg-amber-50 border-t-2 border-amber-200">
                       <td colSpan={3} className="px-4 py-2.5 text-right font-bold text-amber-700">TOTAL VENTA</td>
                       <td className="px-4 py-2.5 text-right font-bold text-amber-700 text-base font-mono">{formatCurrency(total)}</td>
@@ -579,6 +767,12 @@ function NuevaVentaModal({
                   </tfoot>
                 </table>
               </div>
+
+              {error && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-xs font-semibold text-red-700">
+                  {error}
+                </div>
+              )}
 
               <div className="flex justify-between pt-2 border-t border-zinc-100">
                 <Button variant="secondary" onClick={() => setStep('productos')}>Atrás</Button>
@@ -756,7 +950,7 @@ export function Ventas() {
         const lines = pdf.splitTextToSize(item.nombre, 44);
         pdf.text(`${item.cantidad}x`, 4, y);
         pdf.text(lines[0], 14, y);
-        pdf.text(formatCurrency(item.subtotal), pageWidth - 4, y, { align: 'right' });
+        pdf.text(Number(item.precio_unitario) === 0 ? 'OBSEQUIO' : formatCurrency(item.subtotal), pageWidth - 4, y, { align: 'right' });
         y += 4;
 
         if (lines.length > 1) {
@@ -856,8 +1050,8 @@ export function Ventas() {
       const tableData = v.items.map(item => [
         item.nombre,
         item.cantidad.toString(),
-        formatCurrency(item.precio_unitario),
-        formatCurrency(item.subtotal)
+        Number(item.precio_unitario) === 0 ? '—' : formatCurrency(item.precio_unitario),
+        Number(item.precio_unitario) === 0 ? 'OBSEQUIO' : formatCurrency(item.subtotal)
       ]);
 
       autoTable(pdf, {
@@ -1194,8 +1388,12 @@ export function Ventas() {
                         <tr key={item.producto_id} className="hover:bg-zinc-50/20 print:border-b print:border-zinc-200">
                           <td className="px-3 py-2 text-zinc-800 font-medium print:text-black print:px-0 print:py-1.5" title={item.nombre}>{item.nombre}</td>
                           <td className="px-3 py-2 text-center text-zinc-600 font-mono print:text-black print:px-0 print:py-1.5">{item.cantidad}</td>
-                          <td className="px-3 py-2 text-right text-zinc-600 font-mono print:text-black print:px-0 print:py-1.5">{formatCurrency(item.precio_unitario)}</td>
-                          <td className="px-3 py-2 text-right font-bold text-zinc-900 font-mono print:text-black print:px-0 print:py-1.5">{formatCurrency(item.subtotal)}</td>
+                          <td className="px-3 py-2 text-right text-zinc-600 font-mono print:text-black print:px-0 print:py-1.5">{Number(item.precio_unitario) === 0 ? '—' : formatCurrency(item.precio_unitario)}</td>
+                          <td className="px-3 py-2 text-right font-bold font-mono print:text-black print:px-0 print:py-1.5">
+                            {Number(item.precio_unitario) === 0
+                              ? <span className="text-emerald-600">OBSEQUIO</span>
+                              : <span className="text-zinc-900">{formatCurrency(item.subtotal)}</span>}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

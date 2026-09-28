@@ -154,18 +154,42 @@ export function Dashboard() {
   // materias primas. Mezclarlas impide saber de dónde sale realmente la ganancia.
   const catalogo = { vendido: 0, costo: 0 };
   const preparados = { vendido: 0, costo: 0 };
+  // Una línea a precio 0 sobre un producto del catálogo es un obsequio: no deja ingreso,
+  // pero su costo sí salió del inventario y por eso se sigue restando de la ganancia.
+  // Se contabiliza aparte para que el margen no baje sin explicación visible.
+  const obsequios = { unidades: 0, costo: 0 };
+  // Un descuento se registra como una línea negativa de la venta. No es mercancía, así que
+  // no entra en el reparto por naturaleza; se acumula aparte y agrupado por su motivo.
+  const descuentos = { total: 0, ventas: 0, porMotivo: new Map<string, number>() };
 
   for (const v of ventasActivas) {
+    let tuvoDescuento = false;
     for (const item of v.items) {
       const cantidadVendida = Number(item.cantidad) || 1;
+      const subtotalLinea = Number(item.subtotal) || 0;
+
+      if (subtotalLinea < 0) {
+        const motivo = (item.nombre || '').split('·')[1]?.trim() || 'sin motivo';
+        descuentos.total += Math.abs(subtotalLinea);
+        descuentos.porMotivo.set(motivo, (descuentos.porMotivo.get(motivo) || 0) + Math.abs(subtotalLinea));
+        tuvoDescuento = true;
+        continue;
+      }
+
       const p = productos.find(prod => prod.id === item.producto_id);
       if (p) {
+        const costoLinea = cantidadVendida * (Number(p.precio_costo) || 0);
         catalogo.vendido += Number(item.subtotal) || 0;
-        catalogo.costo += cantidadVendida * (Number(p.precio_costo) || 0);
+        catalogo.costo += costoLinea;
+        if (Number(item.precio_unitario) === 0) {
+          obsequios.unidades += cantidadVendida;
+          obsequios.costo += costoLinea;
+        }
       } else {
         preparados.vendido += Number(item.subtotal) || 0;
       }
     }
+    if (tuvoDescuento) descuentos.ventas++;
     preparados.costo += costoRecetaPorFactura.get(v.factura) || 0;
   }
 
@@ -432,6 +456,55 @@ export function Dashboard() {
         </div>
       </div>
 
+      {descuentos.total > 0 && (
+        <div className="bg-white rounded-xl border border-zinc-200 p-6 shadow-sm mb-6">
+          <div className="flex items-baseline justify-between mb-3">
+            <h2 className="text-base font-semibold text-zinc-800">Descuentos Otorgados</h2>
+            <span className="text-xs text-zinc-400">Rebajas aplicadas sobre el precio de venta</span>
+          </div>
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-4">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-2xl font-extrabold text-emerald-700 font-mono">{formatCurrency(descuentos.total)}</p>
+                <p className="text-[11px] text-emerald-600 mt-0.5">
+                  en {descuentos.ventas} venta{descuentos.ventas === 1 ? '' : 's'} · ya descontado de la facturación
+                </p>
+              </div>
+              <div className="text-right space-y-0.5">
+                {[...descuentos.porMotivo.entries()]
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([motivo, monto]) => (
+                    <div key={motivo} className="flex items-baseline justify-end gap-2">
+                      <span className="text-[11px] text-zinc-500 capitalize">{motivo}</span>
+                      <span className="text-[11px] font-mono font-semibold text-zinc-700 w-20 text-right">{formatCurrency(monto)}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {obsequios.unidades > 0 && (
+        <div className="bg-white rounded-xl border border-zinc-200 p-6 shadow-sm mb-6">
+          <div className="flex items-baseline justify-between mb-3">
+            <h2 className="text-base font-semibold text-zinc-800">Obsequios Entregados</h2>
+            <span className="text-xs text-zinc-400">Productos que salieron sin cobrarse</span>
+          </div>
+          <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-4 flex items-center justify-between">
+            <div>
+              <p className="text-2xl font-extrabold text-emerald-700 font-mono">{obsequios.unidades}</p>
+              <p className="text-[11px] text-emerald-600 mt-0.5">unidad(es) obsequiada(s)</p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider">Costo que representan</p>
+              <p className="text-xl font-extrabold text-zinc-700 font-mono mt-0.5">{formatCurrency(obsequios.costo)}</p>
+              <p className="text-[11px] text-zinc-400 mt-0.5">ya descontado de la ganancia</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Desglose por naturaleza del negocio */}
       <div className="bg-white rounded-xl border border-zinc-200 p-6 shadow-sm mb-8">
         <div className="flex items-baseline justify-between mb-4">
@@ -458,6 +531,19 @@ export function Dashboard() {
                 <td className="py-2.5 text-right font-mono text-zinc-600">{formatCurrency(catalogo.costo)}</td>
                 <td className="py-2.5 text-right font-mono text-zinc-600">{formatCurrency(preparados.costo)}</td>
               </tr>
+              {obsequios.costo > 0 && (
+                <tr>
+                  <td className="py-1.5 pl-3 text-zinc-400 text-[11px]">· de eso, obsequios</td>
+                  <td className="py-1.5 text-right font-mono text-[11px] text-emerald-600">{formatCurrency(obsequios.costo)}</td>
+                  <td className="py-1.5 text-right font-mono text-[11px] text-zinc-300">—</td>
+                </tr>
+              )}
+              {descuentos.total > 0 && (
+                <tr>
+                  <td className="py-1.5 text-zinc-400 text-[11px]">menos descuentos otorgados</td>
+                  <td colSpan={2} className="py-1.5 text-right font-mono text-[11px] text-emerald-600">−{formatCurrency(descuentos.total)}</td>
+                </tr>
+              )}
               <tr className="bg-zinc-50/60">
                 <td className="py-2.5 text-zinc-700 text-xs font-bold uppercase">Ganancia</td>
                 {[catalogo, preparados].map((d, i) => {
